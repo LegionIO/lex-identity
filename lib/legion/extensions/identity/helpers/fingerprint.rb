@@ -47,7 +47,7 @@ module Legion
             first_half = values[0...(values.size / 2)]
             second_half = values[(values.size / 2)..]
 
-            diff = second_half.sum / second_half.size - first_half.sum / first_half.size
+            diff = (second_half.sum / second_half.size) - (first_half.sum / first_half.size)
             if diff > 0.1
               :rising
             elsif diff < -0.1
@@ -71,9 +71,9 @@ module Legion
 
           def to_h
             {
-              model:             @model,
-              observation_count: @observation_count,
-              maturity:          maturity,
+              model:                @model,
+              observation_count:    @observation_count,
+              maturity:             maturity,
               entropy_history_size: @entropy_history.size
             }
           end

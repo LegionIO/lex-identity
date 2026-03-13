@@ -39,7 +39,7 @@ module Legion
               next unless obs
 
               baseline = model[dim]
-              next 0.0 unless baseline && baseline[:observations] > 0
+              next 0.0 unless baseline && baseline[:observations].positive?
 
               # Weighted divergence from established baseline
               (obs - baseline[:mean]).abs / [baseline[:variance].to_f, 0.1].max

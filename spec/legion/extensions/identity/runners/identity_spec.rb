@@ -39,9 +39,7 @@ RSpec.describe Legion::Extensions::Identity::Runners::Identity do
       20.times { client.observe_behavior(dimension: :communication_cadence, value: 0.5) }
       # Check with very different observation
       result = client.check_entropy(observations: { communication_cadence: 10.0 })
-      if result[:classification] == :high_entropy
-        expect(result[:warning]).to eq(:possible_impersonation_or_drift)
-      end
+      expect(result[:warning]).to eq(:possible_impersonation_or_drift) if result[:classification] == :high_entropy
     end
   end
 
