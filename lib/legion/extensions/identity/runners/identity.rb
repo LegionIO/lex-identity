@@ -12,6 +12,8 @@ module Legion
             fingerprint = identity_fingerprint
             fingerprint.observe(dimension, value)
 
+            Legion::Logging.debug "[identity] observe: dim=#{dimension} val=#{value.round(2)} " \
+                                  "obs=#{fingerprint.observation_count} maturity=#{fingerprint.maturity}"
             {
               dimension:         dimension,
               recorded:          true,
@@ -24,6 +26,8 @@ module Legion
             fingerprint = identity_fingerprint
             fingerprint.observe_all(observations)
 
+            Legion::Logging.debug "[identity] observe_all: dims=#{observations.keys.join(',')} " \
+                                  "obs=#{fingerprint.observation_count} maturity=#{fingerprint.maturity}"
             {
               dimensions_observed: observations.keys,
               observation_count:   fingerprint.observation_count,
@@ -44,14 +48,17 @@ module Legion
               in_range:       Helpers::Dimensions::OPTIMAL_ENTROPY_RANGE.cover?(entropy)
             }
 
-            # Add warnings for anomalous entropy
             case classification
             when :high_entropy
               result[:warning] = :possible_impersonation_or_drift
               result[:action] = :enter_caution_mode
+              Legion::Logging.warn "[identity] high entropy detected: #{entropy.round(3)} trend=#{trend} - possible impersonation"
             when :low_entropy
               result[:warning] = :possible_automation
               result[:action] = :trigger_verification
+              Legion::Logging.warn "[identity] low entropy detected: #{entropy.round(3)} trend=#{trend} - possible automation"
+            else
+              Legion::Logging.debug "[identity] entropy check: #{entropy.round(3)} classification=#{classification} trend=#{trend}"
             end
 
             result
@@ -59,6 +66,7 @@ module Legion
 
           def identity_status(**)
             fingerprint = identity_fingerprint
+            Legion::Logging.debug "[identity] status: maturity=#{fingerprint.maturity} observations=#{fingerprint.observation_count}"
             fingerprint.to_h
           end
 
