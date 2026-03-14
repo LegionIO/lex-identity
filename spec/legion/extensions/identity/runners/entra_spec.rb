@@ -276,7 +276,8 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
 
     context 'when there are active workers' do
       it 'returns the count of workers scanned and an empty orphans list (pending Entra validation)' do
-        active_worker = double('DigitalWorker', worker_id: 'worker-abc', owner_msid: 'alice@example.com')
+        active_worker = double('DigitalWorker', worker_id: 'worker-abc', owner_msid: 'alice@example.com',
+                                                entra_app_id: 'entra-app-abc')
         stub_data_model(build_model_double(active_all: [active_worker]))
 
         result = client.check_orphans

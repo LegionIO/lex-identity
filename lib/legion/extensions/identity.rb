@@ -3,7 +3,10 @@
 require 'legion/extensions/identity/version'
 require 'legion/extensions/identity/helpers/dimensions'
 require 'legion/extensions/identity/helpers/fingerprint'
+require 'legion/extensions/identity/helpers/vault_secrets'
 require 'legion/extensions/identity/runners/identity'
+require 'legion/extensions/identity/runners/entra'
+require 'legion/extensions/identity/actors/orphan_check'
 
 module Legion
   module Extensions

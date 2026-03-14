@@ -1,7 +1,7 @@
 # lex-identity
 
 **Level 3 Documentation**
-- **Parent**: `extensions-agentic/CLAUDE.md`
+- **Parent**: `/Users/miverso2/rubymine/legion/extensions-agentic/CLAUDE.md`
 - **Grandparent**: `/Users/miverso2/rubymine/legion/CLAUDE.md`
 
 ## Purpose
@@ -22,10 +22,17 @@ Human partner identity modeling for the LegionIO cognitive architecture. Builds 
 lib/legion/extensions/identity/
   version.rb
   helpers/
-    dimensions.rb   # IDENTITY_DIMENSIONS, entropy thresholds, new_identity_model, compute_entropy, classify_entropy
-    fingerprint.rb  # Fingerprint class - EMA model, observation tracking, entropy history
+    dimensions.rb    # IDENTITY_DIMENSIONS, entropy thresholds, new_identity_model, compute_entropy, classify_entropy
+    fingerprint.rb   # Fingerprint class - EMA model, observation tracking, entropy history
+    vault_secrets.rb # VaultSecrets helper - store/read/delete Entra client secrets at
+                     # secret/data/legion/workers/{id}/entra via Legion::Crypt::Vault
+  actors/
+    orphan_check.rb  # Every 4hr periodic actor - calls Entra.check_orphans, auto-pauses
+                     # orphaned workers via DigitalWorker lifecycle; skips system_placeholder? workers
   runners/
-    identity.rb     # observe_behavior, observe_all, check_entropy, identity_status, identity_maturity
+    identity.rb      # observe_behavior, observe_all, check_entropy, identity_status, identity_maturity
+    entra.rb         # Entra ID Application integration for Digital Workers:
+                     # validate_worker_identity, sync_owner, transfer_ownership, check_orphans
 spec/
   legion/extensions/identity/
     helpers/
@@ -33,6 +40,7 @@ spec/
       fingerprint_spec.rb
     runners/
       identity_spec.rb
+      entra_spec.rb
     client_spec.rb
 ```
 
@@ -75,11 +83,35 @@ OBSERVATION_ALPHA      = 0.1   # EMA alpha for dimension updates
 - Diff < -0.1 -> `:falling`
 - else -> `:stable`
 
+## Entra ID Integration (Runners::Entra)
+
+`Runners::Entra` handles Digital Worker identity binding via Entra ID (Azure Active Directory) Applications.
+
+Permission model:
+- Entra app CREATION is done by the human owner (Legion intentionally does not have `Application.ReadWrite.All`)
+- Legion gets `Application.Read.All` or `Directory.Read.All` for read operations
+- OIDC token validation uses the public JWKS endpoint (no special permission needed)
+- Write operations (ownership transfer) update the Legion DB and emit events; the human completes the Entra side manually
+
+Runner methods:
+- `validate_worker_identity(worker_id:, entra_app_id:)` - checks Entra app exists and validates OIDC token
+- `sync_owner(worker_id:)` - syncs owner MSID from Entra app ownership (reads `legion-data` DigitalWorker model)
+- `transfer_ownership(worker_id:, new_owner_msid:, transferred_by:, reason:)` - updates Legion DB, emits audit event
+- `check_orphans` - scans active workers for disabled Entra apps or inactive owners; auto-pause is handled by the `OrphanCheck` actor, not this runner
+
+Design decisions:
+- `find_worker` is private; looks up via `Legion::Data::Model::DigitalWorker` if available, returns nil otherwise
+- All Graph API calls have TODO stubs — reads pending `Application.Read.All` permission grant
+- Transfer emits `Legion::Events.emit('worker.ownership_transferred', ...)` if Events is available
+- `entra_action_required` field in transfer audit tells the human what to do on the Entra side
+
 ## Integration Points
 
 - **lex-tick**: `identity_entropy_check` phase calls `check_entropy` each tick
 - **lex-coldstart**: observations during imprint window build the initial baseline
 - **lex-privatecore**: high entropy triggers caution mode
+- **legion-data**: `Runners::Entra` reads/writes `Legion::Data::Model::DigitalWorker` for worker records
+- **legion-crypt**: `Helpers::VaultSecrets` delegates to `Legion::Crypt::Vault` for reading/writing Entra client secrets in Vault at `secret/data/legion/workers/{id}/entra`
 
 ## Development Notes
 
@@ -87,3 +119,4 @@ OBSERVATION_ALPHA      = 0.1   # EMA alpha for dimension updates
 - Dimensions not in `IDENTITY_DIMENSIONS` are silently ignored in `observe`
 - The `observations` parameter to `check_entropy` is the current-tick observation hash, not cumulative; the model is the cumulative baseline
 - Maturity levels (`:nascent`, `:developing`, `:established`, `:mature`) are based on total `observation_count`, not per-dimension counts
+- `Runners::Entra` has zero behavioral fingerprint dependency — it operates on DB records, not the in-memory model

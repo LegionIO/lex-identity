@@ -91,6 +91,29 @@ Legion::Extensions::Identity::Runners::Identity.identity_status
 Legion::Extensions::Identity::Runners::Identity.identity_maturity
 ```
 
+## Digital Worker Identity — Entra ID Integration
+
+`lex-identity` also contains `Runners::Entra` for managing Digital Worker identity via Entra ID (Azure Active Directory) Applications. A Digital Worker is an Entra ID Application (service principal) — not a user account. App ownership links the application to a human MSID, which is the identity binding.
+
+```ruby
+# Validate a Digital Worker's Entra app registration
+Legion::Extensions::Identity::Runners::Entra.validate_worker_identity(
+  worker_id: "dw-001",
+  entra_app_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+)
+# => { valid: true, worker_id: "dw-001", owner_msid: "h-12345678", lifecycle: "active" }
+
+# Transfer ownership (updates Legion DB; human must update Entra side manually)
+Legion::Extensions::Identity::Runners::Entra.transfer_ownership(
+  worker_id: "dw-001",
+  new_owner_msid: "h-87654321",
+  transferred_by: "admin-123",
+  reason: "Team reorganization"
+)
+```
+
+Legion intentionally does not hold `Application.ReadWrite.All`. Write operations update the Legion database and emit audit events; the human owner completes the Entra side via Azure Portal or `az` CLI.
+
 ## Development
 
 ```bash

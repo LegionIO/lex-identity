@@ -111,20 +111,30 @@ module Legion
 
             active_workers = Legion::Data::Model::DigitalWorker.where(lifecycle_state: 'active').all
             orphans = []
+            skipped = 0
 
-            # TODO: With Application.Read.All, for each worker:
-            # 1. GET #{GRAPH_API_BASE}/applications/#{entra_object_id} — check if app is disabled
-            # 2. GET #{GRAPH_API_BASE}/users/#{owner_msid} — check if owner account is active
-            # 3. If either is disabled/deleted, mark as orphan
-            # 4. Auto-pause the Legion worker record
-            # 5. Emit event for human to remediate the Entra side
+            active_workers.each do |worker|
+              # Skip auto-registered extension workers without real Entra apps
+              if system_placeholder?(worker.entra_app_id, worker.worker_id)
+                skipped += 1
+                next
+              end
 
-            Legion::Logging.debug "[identity:entra] orphan check: scanned #{active_workers.size} active workers"
+              # TODO: With Application.Read.All, check:
+              # GET #{GRAPH_API_BASE}/applications/#{entra_object_id} — is app disabled?
+              # GET #{GRAPH_API_BASE}/users/#{owner_msid} — is owner active?
+              # If either is disabled/deleted:
+              #   orphans << worker
+              #   auto_pause_orphan(worker, reason: :entra_app_disabled)
+            end
+
+            Legion::Logging.debug "[identity:entra] orphan check: scanned #{active_workers.size} active workers, skipped #{skipped} system workers"
 
             {
               orphans:    orphans.map { |w| { worker_id: w.worker_id, owner_msid: w.owner_msid, reason: :pending_entra_validation } },
-              checked:    active_workers.size,
-              source:     :local, # will be :graph_api when read permission granted
+              checked:    active_workers.size - skipped,
+              skipped:    skipped,
+              source:     :local,
               checked_at: Time.now.utc
             }
           end
@@ -137,6 +147,31 @@ module Legion
               return worker.to_hash if worker
             end
             nil
+          end
+
+          def system_placeholder?(entra_app_id, worker_id)
+            return true if entra_app_id.nil? || entra_app_id == 'system'
+            return true if entra_app_id == worker_id
+            return true if entra_app_id.start_with?('lex-')
+
+            false
+          end
+
+          def auto_pause_orphan(worker, reason:)
+            worker.update(lifecycle_state: 'paused', updated_at: Time.now.utc)
+
+            if defined?(Legion::Events)
+              Legion::Events.emit('worker.orphan_detected', {
+                                    worker_id:   worker.worker_id,
+                                    owner_msid:  worker.owner_msid,
+                                    reason:      reason,
+                                    action:      :auto_paused,
+                                    remediation: 'disable or reassign Entra app via Azure Portal',
+                                    at:          Time.now.utc
+                                  })
+            end
+
+            Legion::Logging.warn "[identity:entra] orphan detected: worker=#{worker.worker_id} reason=#{reason} — auto-paused"
           end
         end
       end
