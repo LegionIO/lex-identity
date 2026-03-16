@@ -11,7 +11,7 @@ Human partner identity modeling for the LegionIO cognitive architecture. Builds 
 ## Gem Info
 
 - **Gem name**: `lex-identity`
-- **Version**: `0.1.0`
+- **Version**: `0.2.0`
 - **Module**: `Legion::Extensions::Identity`
 - **Ruby**: `>= 3.4`
 - **License**: MIT
@@ -93,14 +93,29 @@ Permission model:
 - OIDC token validation uses the public JWKS endpoint (no special permission needed)
 - Write operations (ownership transfer) update the Legion DB and emit events; the human completes the Entra side manually
 
+Constants:
+- `ENTRA_JWKS_URL_TEMPLATE` - `https://login.microsoftonline.com/%<tenant_id>s/discovery/v2.0/keys`
+- `ENTRA_ISSUER_TEMPLATE` - `https://login.microsoftonline.com/%<tenant_id>s/v2.0`
+
 Runner methods:
-- `validate_worker_identity(worker_id:, entra_app_id:)` - checks Entra app exists and validates OIDC token
+- `validate_worker_identity(worker_id:, entra_app_id:, token:, tenant_id:)` - validates worker identity; when `token:` is provided and `legion-crypt` is loaded, performs cryptographic OIDC verification via Entra JWKS endpoint. Without token, returns identity info from DB only. Returns `claims:` hash on successful token validation.
 - `sync_owner(worker_id:)` - syncs owner MSID from Entra app ownership (reads `legion-data` DigitalWorker model)
 - `transfer_ownership(worker_id:, new_owner_msid:, transferred_by:, reason:)` - updates Legion DB, emits audit event
 - `check_orphans` - scans active workers for disabled Entra apps or inactive owners; auto-pause is handled by the `OrphanCheck` actor, not this runner
 
+Private helpers:
+- `find_worker` - looks up via `Legion::Data::Model::DigitalWorker` if available, returns nil otherwise
+- `resolve_tenant_id` - reads `Legion::Settings[:identity][:entra][:tenant_id]` if available, returns nil otherwise
+- `system_placeholder?` - returns true for nil, 'system', self-referencing, or 'lex-' prefixed app IDs
+- `auto_pause_orphan` - sets lifecycle_state to 'paused', emits `worker.orphan_detected` event
+
+Token validation error handling (rescue chain in `validate_worker_identity`):
+- `Legion::Crypt::JWT::ExpiredTokenError` -> `{ valid: false, error: 'token_expired' }`
+- `Legion::Crypt::JWT::InvalidTokenError` -> `{ valid: false, error: 'token_invalid' }` (bad signature, wrong issuer, wrong audience)
+- `Legion::Crypt::JWT::Error` -> `{ valid: false, error: 'token_error' }` (JWKS fetch failure, etc.)
+
 Design decisions:
-- `find_worker` is private; looks up via `Legion::Data::Model::DigitalWorker` if available, returns nil otherwise
+- **Graceful degradation**: token validation only runs when `defined?(Legion::Crypt::JWT) && respond_to?(:verify_with_jwks)` — works in environments without legion-crypt
 - All Graph API calls have TODO stubs — reads pending `Application.Read.All` permission grant
 - Transfer emits `Legion::Events.emit('worker.ownership_transferred', ...)` if Events is available
 - `entra_action_required` field in transfer audit tells the human what to do on the Entra side
@@ -112,6 +127,7 @@ Design decisions:
 - **lex-privatecore**: high entropy triggers caution mode
 - **legion-data**: `Runners::Entra` reads/writes `Legion::Data::Model::DigitalWorker` for worker records
 - **legion-crypt**: `Helpers::VaultSecrets` delegates to `Legion::Crypt::Vault` for reading/writing Entra client secrets in Vault at `secret/data/legion/workers/{id}/entra`
+- **legion-crypt** (JWKS): `Runners::Entra` calls `Legion::Crypt::JWT.verify_with_jwks` for OIDC token validation against Entra's public JWKS endpoint (optional, only when token provided and legion-crypt loaded)
 
 ## Development Notes
 
