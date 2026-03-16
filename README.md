@@ -103,6 +103,14 @@ Legion::Extensions::Identity::Runners::Entra.validate_worker_identity(
 )
 # => { valid: true, worker_id: "dw-001", owner_msid: "h-12345678", lifecycle: "active" }
 
+# Validate with OIDC token (cryptographic verification via Entra JWKS endpoint)
+Legion::Extensions::Identity::Runners::Entra.validate_worker_identity(
+  worker_id: "dw-001",
+  token: oidc_jwt_token,
+  tenant_id: "your-entra-tenant-id"
+)
+# => { valid: true, ..., claims: { sub: "...", iss: "...", aud: "..." } }
+
 # Transfer ownership (updates Legion DB; human must update Entra side manually)
 Legion::Extensions::Identity::Runners::Entra.transfer_ownership(
   worker_id: "dw-001",
