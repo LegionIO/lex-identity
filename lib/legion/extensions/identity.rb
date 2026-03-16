@@ -15,3 +15,10 @@ module Legion
     end
   end
 end
+
+if defined?(Legion::Data::Local)
+  Legion::Data::Local.register_migrations(
+    name: :identity,
+    path: File.join(__dir__, 'identity', 'local_migrations')
+  )
+end

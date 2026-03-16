@@ -25,5 +25,6 @@ Gem::Specification.new do |spec|
     Dir.glob('{lib,spec}/**/*') + %w[lex-identity.gemspec Gemfile]
   end
   spec.require_paths = ['lib']
-  spec.add_development_dependency 'legion-gaia'
+  spec.add_development_dependency 'sequel',  '>= 5.70'
+  spec.add_development_dependency 'sqlite3', '>= 2.0'
 end

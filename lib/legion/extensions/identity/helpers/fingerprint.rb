@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require 'json'
+require 'time'
+
 module Legion
   module Extensions
     module Identity
@@ -11,6 +14,7 @@ module Legion
             @model = Dimensions.new_identity_model
             @observation_count = 0
             @entropy_history = []
+            load_from_local
           end
 
           def observe(dimension, value)
@@ -76,6 +80,84 @@ module Legion
               maturity:             maturity,
               entropy_history_size: @entropy_history.size
             }
+          end
+
+          def save_to_local
+            return unless local_available?
+
+            db = Legion::Data::Local.connection
+
+            @model.each do |dimension, data|
+              existing = db[:identity_fingerprint].where(dimension: dimension.to_s).first
+              row = {
+                dimension:     dimension.to_s,
+                mean:          data[:mean],
+                variance:      data[:variance],
+                observations:  data[:observations],
+                last_observed: data[:last_observed]
+              }
+              if existing
+                db[:identity_fingerprint].where(dimension: dimension.to_s).update(row)
+              else
+                db[:identity_fingerprint].insert(row)
+              end
+            end
+
+            history_json = ::JSON.generate(@entropy_history.map { |e| { entropy: e[:entropy], at: e[:at].iso8601 } })
+            meta = db[:identity_meta].first
+            if meta
+              db[:identity_meta].where(id: meta[:id]).update(
+                observation_count: @observation_count,
+                entropy_history:   history_json
+              )
+            else
+              db[:identity_meta].insert(
+                observation_count: @observation_count,
+                entropy_history:   history_json
+              )
+            end
+
+            true
+          rescue StandardError => e
+            Legion::Logging.warn "lex-identity: save_to_local failed: #{e.message}" if defined?(Legion::Logging)
+            false
+          end
+
+          def load_from_local
+            return unless local_available?
+
+            db = Legion::Data::Local.connection
+
+            db[:identity_fingerprint].each do |row|
+              dim = row[:dimension].to_sym
+              next unless @model.key?(dim)
+
+              @model[dim][:mean]          = row[:mean].to_f
+              @model[dim][:variance]      = row[:variance].to_f
+              @model[dim][:observations]  = row[:observations].to_i
+              @model[dim][:last_observed] = row[:last_observed]
+            end
+
+            meta = db[:identity_meta].first
+            if meta
+              @observation_count = meta[:observation_count].to_i
+              raw = meta[:entropy_history]
+              if raw && !raw.empty?
+                parsed = ::JSON.parse(raw)
+                @entropy_history = parsed.map { |e| { entropy: e['entropy'].to_f, at: Time.parse(e['at']) } }
+              end
+            end
+
+            true
+          rescue StandardError => e
+            Legion::Logging.warn "lex-identity: load_from_local failed: #{e.message}" if defined?(Legion::Logging)
+            false
+          end
+
+          private
+
+          def local_available?
+            defined?(Legion::Data::Local) && Legion::Data::Local.connected?
           end
         end
       end
