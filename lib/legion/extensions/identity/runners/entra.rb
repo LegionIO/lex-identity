@@ -15,21 +15,49 @@ module Legion
         #     and emit events; the human completes the Entra side manually
         module Entra
           GRAPH_API_BASE = 'https://graph.microsoft.com/v1.0'
+          ENTRA_JWKS_URL_TEMPLATE = 'https://login.microsoftonline.com/%<tenant_id>s/discovery/v2.0/keys'
+          ENTRA_ISSUER_TEMPLATE = 'https://login.microsoftonline.com/%<tenant_id>s/v2.0'
 
           # Validate a worker's identity by checking its Entra app registration exists
           # and its OIDC token is valid.
           # OIDC validation uses the public JWKS endpoint — no Graph API permission needed.
-          def validate_worker_identity(worker_id:, entra_app_id: nil, **)
+          def validate_worker_identity(worker_id:, entra_app_id: nil, token: nil, tenant_id: nil, **)
             worker = find_worker(worker_id)
             return { valid: false, error: 'worker not found' } unless worker
 
             app_id = entra_app_id || worker[:entra_app_id]
             return { valid: false, error: 'no entra_app_id' } unless app_id
 
-            # TODO: validate OIDC token against public JWKS endpoint:
-            # https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys
-            # No special permission needed — this is a public endpoint.
-            Legion::Logging.debug "[identity:entra] validate: worker=#{worker_id} entra_app=#{app_id}"
+            # If a token is provided and legion-crypt has JWKS support, validate it
+            if token && defined?(Legion::Crypt::JWT) && Legion::Crypt::JWT.respond_to?(:verify_with_jwks)
+              tid = tenant_id || resolve_tenant_id
+              return { valid: false, error: 'no tenant_id configured' } unless tid
+
+              jwks_url = format(ENTRA_JWKS_URL_TEMPLATE, tenant_id: tid)
+              issuer = format(ENTRA_ISSUER_TEMPLATE, tenant_id: tid)
+
+              claims = Legion::Crypt::JWT.verify_with_jwks(
+                token,
+                jwks_url: jwks_url,
+                issuers:  [issuer],
+                audience: app_id
+              )
+
+              Legion::Logging.debug "[identity:entra] token validated: worker=#{worker_id} sub=#{claims[:sub]}"
+
+              return {
+                valid:        true,
+                worker_id:    worker_id,
+                entra_app_id: app_id,
+                owner_msid:   worker[:owner_msid],
+                lifecycle:    worker[:lifecycle_state],
+                claims:       claims,
+                validated_at: Time.now.utc
+              }
+            end
+
+            # No token provided — return identity info without token validation
+            Legion::Logging.debug "[identity:entra] validate (no token): worker=#{worker_id} entra_app=#{app_id}"
 
             {
               valid:        true,
@@ -39,6 +67,12 @@ module Legion
               lifecycle:    worker[:lifecycle_state],
               validated_at: Time.now.utc
             }
+          rescue Legion::Crypt::JWT::ExpiredTokenError => e
+            { valid: false, error: 'token_expired', message: e.message }
+          rescue Legion::Crypt::JWT::InvalidTokenError => e
+            { valid: false, error: 'token_invalid', message: e.message }
+          rescue Legion::Crypt::JWT::Error => e
+            { valid: false, error: 'token_error', message: e.message }
           end
 
           # Sync the worker's owner from Entra app ownership.
@@ -155,6 +189,15 @@ module Legion
             return true if entra_app_id.start_with?('lex-')
 
             false
+          end
+
+          def resolve_tenant_id
+            if defined?(Legion::Settings) &&
+               Legion::Settings[:identity]&.dig(:entra, :tenant_id)
+              return Legion::Settings[:identity][:entra][:tenant_id]
+            end
+
+            nil
           end
 
           def auto_pause_orphan(worker, reason:)

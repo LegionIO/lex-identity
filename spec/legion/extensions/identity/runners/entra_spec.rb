@@ -124,6 +124,120 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
   end
 
   # ---------------------------------------------------------------------------
+  # validate_worker_identity — JWKS token validation
+  # ---------------------------------------------------------------------------
+
+  describe '#validate_worker_identity (JWKS)' do
+    context 'without token' do
+      it 'returns valid without token validation' do
+        stub_data_model(build_model_double)
+
+        result = client.validate_worker_identity(worker_id: 'worker-abc')
+        expect(result[:valid]).to be true
+        expect(result).not_to have_key(:claims)
+      end
+    end
+
+    context 'with token and JWKS support' do
+      let(:claims) { { sub: 'worker-abc', iss: 'https://login.microsoftonline.com/tenant-1/v2.0' } }
+
+      before do
+        stub_data_model(build_model_double)
+        jwt_mod = Module.new do
+          def self.verify_with_jwks(*, **)
+            nil
+          end
+        end
+        stub_const('Legion::Crypt::JWT', jwt_mod)
+        allow(Legion::Crypt::JWT).to receive(:verify_with_jwks).and_return(claims)
+        allow(client).to receive(:resolve_tenant_id).and_return('tenant-1')
+      end
+
+      it 'validates the token via JWKS' do
+        result = client.validate_worker_identity(worker_id: 'worker-abc', token: 'jwt-token')
+        expect(result[:valid]).to be true
+        expect(result[:claims]).to eq(claims)
+      end
+
+      it 'passes correct JWKS URL and issuer' do
+        expect(Legion::Crypt::JWT).to receive(:verify_with_jwks).with(
+          'jwt-token',
+          jwks_url: 'https://login.microsoftonline.com/tenant-1/discovery/v2.0/keys',
+          issuers:  ['https://login.microsoftonline.com/tenant-1/v2.0'],
+          audience: 'app-id-123'
+        )
+        client.validate_worker_identity(worker_id: 'worker-abc', token: 'jwt-token')
+      end
+    end
+
+    context 'when token is expired' do
+      before do
+        stub_data_model(build_model_double)
+        jwt_mod = Module.new do
+          def self.verify_with_jwks(*, **)
+            nil
+          end
+        end
+        stub_const('Legion::Crypt::JWT', jwt_mod)
+        stub_const('Legion::Crypt::JWT::Error', Class.new(StandardError))
+        stub_const('Legion::Crypt::JWT::ExpiredTokenError', Class.new(Legion::Crypt::JWT::Error))
+        allow(Legion::Crypt::JWT).to receive(:verify_with_jwks)
+          .and_raise(Legion::Crypt::JWT::ExpiredTokenError, 'token has expired')
+        allow(client).to receive(:resolve_tenant_id).and_return('tenant-1')
+      end
+
+      it 'returns valid false with token_expired error' do
+        result = client.validate_worker_identity(worker_id: 'worker-abc', token: 'expired-jwt')
+        expect(result[:valid]).to be false
+        expect(result[:error]).to eq('token_expired')
+      end
+    end
+
+    context 'when token signature is invalid' do
+      before do
+        stub_data_model(build_model_double)
+        jwt_mod = Module.new do
+          def self.verify_with_jwks(*, **)
+            nil
+          end
+        end
+        stub_const('Legion::Crypt::JWT', jwt_mod)
+        stub_const('Legion::Crypt::JWT::Error', Class.new(StandardError))
+        stub_const('Legion::Crypt::JWT::ExpiredTokenError', Class.new(Legion::Crypt::JWT::Error))
+        stub_const('Legion::Crypt::JWT::InvalidTokenError', Class.new(Legion::Crypt::JWT::Error))
+        allow(Legion::Crypt::JWT).to receive(:verify_with_jwks)
+          .and_raise(Legion::Crypt::JWT::InvalidTokenError, 'signature verification failed')
+        allow(client).to receive(:resolve_tenant_id).and_return('tenant-1')
+      end
+
+      it 'returns valid false with token_invalid error' do
+        result = client.validate_worker_identity(worker_id: 'worker-abc', token: 'bad-jwt')
+        expect(result[:valid]).to be false
+        expect(result[:error]).to eq('token_invalid')
+      end
+    end
+
+    context 'when no tenant_id configured' do
+      before do
+        stub_data_model(build_model_double)
+        jwt_mod = Module.new do
+          def self.verify_with_jwks(*, **)
+            nil
+          end
+        end
+        stub_const('Legion::Crypt::JWT', jwt_mod)
+        allow(client).to receive(:resolve_tenant_id).and_return(nil)
+      end
+
+      it 'returns valid false with no tenant_id error' do
+        result = client.validate_worker_identity(worker_id: 'worker-abc', token: 'jwt-token')
+        expect(result[:valid]).to be false
+        expect(result[:error]).to eq('no tenant_id configured')
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # sync_owner
   # ---------------------------------------------------------------------------
 
