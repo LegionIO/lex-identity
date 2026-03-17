@@ -77,23 +77,47 @@ module Legion
 
           # Sync the worker's owner from Entra app ownership.
           # Requires: Application.Read.All or Directory.Read.All (read-only)
+          # Falls back to local record when Graph API credentials unavailable.
           def sync_owner(worker_id:, **)
             worker = find_worker(worker_id)
             return { synced: false, error: 'worker not found' } unless worker
 
-            # TODO: With Application.Read.All, call:
-            # GET #{GRAPH_API_BASE}/applications/#{worker[:entra_object_id]}/owners
-            # Parse owner MSID from response, update local record
+            entra_object_id = worker[:entra_object_id]
+            return { synced: false, worker_id: worker_id, error: 'no entra_object_id', source: :local } unless entra_object_id
 
-            Legion::Logging.debug "[identity:entra] sync_owner: worker=#{worker_id} current_owner=#{worker[:owner_msid]}"
+            creds = resolve_graph_credentials
+            unless creds
+              Legion::Logging.debug "[identity:entra] sync_owner fallback to local: worker=#{worker_id}"
+              return { synced: true, worker_id: worker_id, source: :local,
+                       owner_msid: worker[:owner_msid], synced_at: Time.now.utc }
+            end
 
-            {
-              synced:     true,
-              worker_id:  worker_id,
-              owner_msid: worker[:owner_msid],
-              source:     :local, # will be :graph_api when read permission granted
-              synced_at:  Time.now.utc
-            }
+            token = Helpers::GraphToken.fetch(**creds)
+            conn = Helpers::GraphClient.connection(token: token)
+            resp = conn.get("applications/#{entra_object_id}/owners")
+
+            unless resp.success?
+              Legion::Logging.warn "[identity:entra] graph owner sync failed: #{resp.status}"
+              return { synced: false, worker_id: worker_id, source: :local, owner_msid: worker[:owner_msid] }
+            end
+
+            owners = resp.body['value'] || []
+            graph_owner_msid = owners.first&.dig('id')
+            changed = graph_owner_msid && graph_owner_msid != worker[:owner_msid].to_s
+
+            if changed && defined?(Legion::Data::Model::DigitalWorker)
+              Legion::Data::Model::DigitalWorker.where(worker_id: worker_id).update(owner_msid: graph_owner_msid)
+              if defined?(Legion::Events)
+                Legion::Events.emit('worker.owner_changed', { worker_id: worker_id, old: worker[:owner_msid],
+                                                              new: graph_owner_msid })
+              end
+            end
+
+            { synced: true, source: :graph_api, worker_id: worker_id,
+              owner_msid: graph_owner_msid || worker[:owner_msid], changed: !changed.nil?, synced_at: Time.now.utc }
+          rescue Helpers::GraphToken::GraphTokenError, Faraday::Error => e
+            Legion::Logging.warn "[identity:entra] graph sync error: #{e.message}"
+            { synced: false, worker_id: worker_id, source: :local, error: e.message }
           end
 
           # Transfer ownership of a digital worker to a new human.
@@ -140,6 +164,7 @@ module Legion
           # Requires: Application.Read.All or Directory.Read.All (read-only)
           # Orphan REMEDIATION (disabling apps) requires human action since Legion
           # does not have Application.ReadWrite.All.
+          # Falls back to local-only scan when Graph API credentials unavailable.
           def check_orphans(**)
             return { orphans: [], checked: 0, source: :unavailable } unless defined?(Legion::Data) && defined?(Legion::Data::Model::DigitalWorker)
 
@@ -147,30 +172,52 @@ module Legion
             orphans = []
             skipped = 0
 
+            creds = resolve_graph_credentials
+            conn = nil
+            if creds
+              token = Helpers::GraphToken.fetch(**creds)
+              conn = Helpers::GraphClient.connection(token: token)
+            end
+
             active_workers.each do |worker|
-              # Skip auto-registered extension workers without real Entra apps
               if system_placeholder?(worker.entra_app_id, worker.worker_id)
                 skipped += 1
                 next
               end
 
-              # TODO: With Application.Read.All, check:
-              # GET #{GRAPH_API_BASE}/applications/#{entra_object_id} — is app disabled?
-              # GET #{GRAPH_API_BASE}/users/#{owner_msid} — is owner active?
-              # If either is disabled/deleted:
-              #   orphans << worker
-              #   auto_pause_orphan(worker, reason: :entra_app_disabled)
+              next unless conn
+
+              orphan_reason = check_worker_orphan_status(conn, worker)
+              if orphan_reason
+                orphans << worker
+                auto_pause_orphan(worker, reason: orphan_reason)
+              end
+            rescue Faraday::Error => e
+              Legion::Logging.warn "[identity:entra] graph error scanning #{worker.worker_id}: #{e.message}"
             end
 
-            Legion::Logging.debug "[identity:entra] orphan check: scanned #{active_workers.size} active workers, skipped #{skipped} system workers"
+            source = conn ? :graph_api : :local
+            Legion::Logging.debug "[identity:entra] orphan check (#{source}): scanned #{active_workers.size}, skipped #{skipped}"
 
             {
-              orphans:    orphans.map { |w| { worker_id: w.worker_id, owner_msid: w.owner_msid, reason: :pending_entra_validation } },
+              orphans:    orphans.map { |w| { worker_id: w.worker_id, owner_msid: w.owner_msid, reason: :entra_orphan } },
               checked:    active_workers.size - skipped,
               skipped:    skipped,
-              source:     :local,
+              source:     source,
               checked_at: Time.now.utc
             }
+          rescue Helpers::GraphToken::GraphTokenError => e
+            Legion::Logging.warn "[identity:entra] orphan check token error: #{e.message}"
+            { orphans: [], checked: 0, source: :local, error: e.message, checked_at: Time.now.utc }
+          end
+
+          # Map Entra security group OIDs to Legion governance roles
+          def resolve_governance_roles(groups:, **)
+            group_map = Legion::Settings.dig(:rbac, :entra, :group_map) || {}
+            default_role = Legion::Settings.dig(:rbac, :entra, :default_role) || 'governance-observer'
+            matched = Array(groups).filter_map { |oid| group_map[oid] }.uniq
+            matched = [default_role] if matched.empty?
+            { success: true, groups: groups, roles: matched }
           end
 
           def refresh_access_token(worker_id:, force: false, **)
@@ -294,6 +341,35 @@ module Legion
             if defined?(Legion::Settings) &&
                Legion::Settings[:identity]&.dig(:entra, :tenant_id)
               return Legion::Settings[:identity][:entra][:tenant_id]
+            end
+
+            nil
+          end
+
+          def resolve_graph_credentials
+            tenant_id = resolve_tenant_id
+            return nil unless tenant_id
+
+            secret = Helpers::VaultSecrets.read_client_secret(worker_id: 'legion/identity')
+            return nil unless secret && secret[:client_id] && secret[:client_secret]
+
+            { tenant_id: tenant_id, client_id: secret[:client_id], client_secret: secret[:client_secret] }
+          rescue StandardError
+            nil
+          end
+
+          def check_worker_orphan_status(conn, worker)
+            # Check if the Entra app registration still exists
+            if worker.respond_to?(:entra_object_id) && worker.entra_object_id
+              app_resp = conn.get("applications/#{worker.entra_object_id}")
+              return :entra_app_deleted unless app_resp.success?
+            end
+
+            # Check if the owner account is still active
+            if worker.owner_msid
+              user_resp = conn.get("users/#{worker.owner_msid}")
+              return :owner_deleted unless user_resp.success?
+              return :owner_disabled if user_resp.body['accountEnabled'] == false
             end
 
             nil

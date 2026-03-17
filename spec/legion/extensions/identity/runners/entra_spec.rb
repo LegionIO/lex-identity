@@ -44,6 +44,7 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
 
     scope_double = double('Scope')
     allow(scope_double).to receive(:all).and_return(active_all)
+    allow(scope_double).to receive(:update)
 
     model_double = double('DigitalWorker model')
     allow(model_double).to receive(:first).and_return(worker_double)
@@ -344,20 +345,6 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
   # ---------------------------------------------------------------------------
 
   describe '#sync_owner' do
-    context 'when the worker exists' do
-      it 'returns synced: true with current owner info from local record' do
-        stub_data_model(build_model_double)
-
-        result = client.sync_owner(worker_id: 'worker-abc')
-
-        expect(result[:synced]).to be true
-        expect(result[:worker_id]).to eq('worker-abc')
-        expect(result[:owner_msid]).to eq('alice@example.com')
-        expect(result[:source]).to eq(:local)
-        expect(result[:synced_at]).to be_a(Time)
-      end
-    end
-
     context 'when the worker does not exist' do
       it 'returns synced: false with error' do
         model_double = double('DigitalWorker model')
@@ -368,6 +355,61 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
 
         expect(result[:synced]).to be false
         expect(result[:error]).to eq('worker not found')
+      end
+    end
+
+    context 'when credentials are unavailable' do
+      it 'falls back to local source' do
+        stub_data_model(build_model_double)
+        allow(client).to receive(:resolve_graph_credentials).and_return(nil)
+
+        result = client.sync_owner(worker_id: 'worker-abc')
+
+        expect(result[:synced]).to be true
+        expect(result[:source]).to eq(:local)
+        expect(result[:owner_msid]).to eq('alice@example.com')
+      end
+    end
+
+    context 'when Graph API call succeeds' do
+      before do
+        stub_data_model(build_model_double)
+        allow(client).to receive(:resolve_graph_credentials)
+          .and_return({ tenant_id: 't', client_id: 'c', client_secret: 's' })
+
+        graph_token = Legion::Extensions::Identity::Helpers::GraphToken
+        allow(graph_token).to receive(:fetch).and_return('token')
+
+        @conn = instance_double(Faraday::Connection)
+        allow(Legion::Extensions::Identity::Helpers::GraphClient).to receive(:connection).and_return(@conn)
+      end
+
+      it 'returns source: :graph_api on success' do
+        allow(@conn).to receive(:get)
+          .and_return(double(success?: true, body: { 'value' => [{ 'id' => 'owner-123' }] }))
+
+        result = client.sync_owner(worker_id: 'worker-abc')
+        expect(result[:source]).to eq(:graph_api)
+        expect(result[:synced]).to be true
+      end
+
+      it 'returns source: :local when Graph API call fails' do
+        allow(@conn).to receive(:get).and_return(double(success?: false, status: 403))
+
+        result = client.sync_owner(worker_id: 'worker-abc')
+        expect(result[:synced]).to be false
+        expect(result[:source]).to eq(:local)
+      end
+    end
+
+    context 'when worker has no entra_object_id' do
+      it 'returns error with source: :local' do
+        worker_no_obj = worker_record.merge(entra_object_id: nil)
+        stub_data_model(build_model_double(worker_hash: worker_no_obj))
+
+        result = client.sync_owner(worker_id: 'worker-abc')
+        expect(result[:synced]).to be false
+        expect(result[:error]).to eq('no entra_object_id')
       end
     end
   end
@@ -480,6 +522,7 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
     context 'when there are no active workers' do
       it 'returns empty orphans list with checked count of 0' do
         stub_data_model(build_model_double(active_all: []))
+        allow(client).to receive(:resolve_graph_credentials).and_return(nil)
 
         result = client.check_orphans
 
@@ -490,11 +533,12 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
       end
     end
 
-    context 'when there are active workers' do
-      it 'returns the count of workers scanned and an empty orphans list (pending Entra validation)' do
+    context 'when credentials are unavailable' do
+      it 'returns source: :local with workers scanned' do
         active_worker = double('DigitalWorker', worker_id: 'worker-abc', owner_msid: 'alice@example.com',
                                                 entra_app_id: 'entra-app-abc')
         stub_data_model(build_model_double(active_all: [active_worker]))
+        allow(client).to receive(:resolve_graph_credentials).and_return(nil)
 
         result = client.check_orphans
 
@@ -502,6 +546,110 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
         expect(result[:orphans]).to eq([])
         expect(result[:source]).to eq(:local)
       end
+    end
+
+    context 'when Graph API detects orphan (app deleted)' do
+      it 'auto-pauses the orphaned worker' do
+        active_worker = double('DigitalWorker', worker_id: 'worker-abc', owner_msid: 'alice@example.com',
+                                                entra_app_id: 'entra-app-abc', entra_object_id: 'obj-456')
+        allow(active_worker).to receive(:update)
+        stub_data_model(build_model_double(active_all: [active_worker]))
+
+        allow(client).to receive(:resolve_graph_credentials)
+          .and_return({ tenant_id: 't', client_id: 'c', client_secret: 's' })
+        allow(Legion::Extensions::Identity::Helpers::GraphToken).to receive(:fetch).and_return('token')
+
+        conn = instance_double(Faraday::Connection)
+        allow(Legion::Extensions::Identity::Helpers::GraphClient).to receive(:connection).and_return(conn)
+        allow(conn).to receive(:get).with('applications/obj-456').and_return(double(success?: false))
+
+        result = client.check_orphans
+        expect(result[:orphans].size).to eq(1)
+        expect(result[:source]).to eq(:graph_api)
+      end
+    end
+
+    context 'when one worker errors during scan' do
+      it 'continues scanning remaining workers' do
+        w1 = double('DigitalWorker', worker_id: 'w1', owner_msid: 'a@x.com',
+                                     entra_app_id: 'app1', entra_object_id: 'obj1')
+        w2 = double('DigitalWorker', worker_id: 'w2', owner_msid: 'b@x.com',
+                                     entra_app_id: 'app2', entra_object_id: 'obj2')
+        stub_data_model(build_model_double(active_all: [w1, w2]))
+
+        allow(client).to receive(:resolve_graph_credentials)
+          .and_return({ tenant_id: 't', client_id: 'c', client_secret: 's' })
+        allow(Legion::Extensions::Identity::Helpers::GraphToken).to receive(:fetch).and_return('token')
+
+        conn = instance_double(Faraday::Connection)
+        allow(Legion::Extensions::Identity::Helpers::GraphClient).to receive(:connection).and_return(conn)
+        allow(conn).to receive(:get).with('applications/obj1').and_raise(Faraday::ConnectionFailed, 'timeout')
+        allow(conn).to receive(:get).with('applications/obj2').and_return(double(success?: true))
+        allow(conn).to receive(:get).with('users/b@x.com').and_return(double(success?: true, body: { 'accountEnabled' => true }))
+
+        result = client.check_orphans
+        expect(result[:checked]).to eq(2)
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # resolve_governance_roles
+  # ---------------------------------------------------------------------------
+
+  describe '#resolve_governance_roles' do
+    let(:group_map) do
+      {
+        '00000000-0000-0000-0000-000000000001' => 'admin',
+        '00000000-0000-0000-0000-000000000002' => 'governance-council',
+        '00000000-0000-0000-0000-000000000003' => 'owner'
+      }
+    end
+
+    before do
+      stub_const('Legion::Settings', Class.new do
+        def self.dig(*keys)
+          map = {
+            %i[rbac entra group_map]    => {
+              '00000000-0000-0000-0000-000000000001' => 'admin',
+              '00000000-0000-0000-0000-000000000002' => 'governance-council',
+              '00000000-0000-0000-0000-000000000003' => 'owner'
+            },
+            %i[rbac entra default_role] => 'governance-observer'
+          }
+          map[keys]
+        end
+
+        def self.[](_key) = {}
+      end)
+    end
+
+    it 'returns matched role for known group OID' do
+      result = client.resolve_governance_roles(groups: ['00000000-0000-0000-0000-000000000001'])
+      expect(result[:success]).to be true
+      expect(result[:roles]).to eq(['admin'])
+    end
+
+    it 'returns all matched roles for multiple groups' do
+      result = client.resolve_governance_roles(
+        groups: %w[00000000-0000-0000-0000-000000000001 00000000-0000-0000-0000-000000000002]
+      )
+      expect(result[:roles]).to contain_exactly('admin', 'governance-council')
+    end
+
+    it 'returns default_role when no groups match' do
+      result = client.resolve_governance_roles(groups: ['unknown-oid'])
+      expect(result[:roles]).to eq(['governance-observer'])
+    end
+
+    it 'returns default_role when groups is nil' do
+      result = client.resolve_governance_roles(groups: nil)
+      expect(result[:roles]).to eq(['governance-observer'])
+    end
+
+    it 'returns default_role when groups is empty' do
+      result = client.resolve_governance_roles(groups: [])
+      expect(result[:roles]).to eq(['governance-observer'])
     end
   end
 end

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0] - 2026-03-17
+
+### Added
+- `Helpers::GraphClient`: Faraday connection builder for Microsoft Graph API with bearer auth
+- `Helpers::GraphToken`: client-credentials token acquisition from Entra for Graph API calls
+- `sync_owner` now calls Graph API `/applications/{id}/owners` for real owner data (falls back to local)
+- `check_orphans` now detects deleted apps and disabled owners via Graph API (falls back to local)
+- `resolve_governance_roles(groups:)`: maps Entra security group OIDs to Legion governance roles via settings
+- Private `resolve_graph_credentials` and `check_worker_orphan_status` helpers
+
 ## [0.3.0] - 2026-03-17
 
 ### Added
