@@ -42,7 +42,7 @@ RSpec.describe Legion::Extensions::Identity::Helpers::Fingerprint, 'local persis
       define_singleton_method(:connection)  { db }
       define_singleton_method(:connected?)  { true }
     end
-    stub_const('Legion::Data',       Module.new)
+    stub_const('Legion::Data', Module.new)
     stub_const('Legion::Data::Local', local_mod)
   end
 
@@ -271,8 +271,8 @@ RSpec.describe Legion::Extensions::Identity::Helpers::Fingerprint, 'local persis
           define_singleton_method(:connection)  { nil } # overridden per example
           define_singleton_method(:connected?)  { true }
         end
-        stub_const('Legion::Data',        Module.new)
-        stub_const('Legion::Data::Local',  local_mod)
+        stub_const('Legion::Data', Module.new)
+        stub_const('Legion::Data::Local', local_mod)
         allow(Legion::Data::Local).to receive(:connection).and_return(db)
       end
 
