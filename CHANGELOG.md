@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-03-17
+
+### Added
+- `Helpers::TokenCache`: thread-safe in-memory OAuth access_token store with expiry tracking
+- `refresh_access_token(worker_id:)`: acquires client_credentials token from Entra, caches result
+- `rotate_client_secret(worker_id:)`: detects approaching credential expiry, emits warning event
+- `credential_refresh_cycle`: batch refresh/rotation check for all active workers
+- `CredentialRefresh` actor: runs every 6 hours
 
 ## [0.2.0] - 2026-03-16
 

@@ -173,6 +173,105 @@ module Legion
             }
           end
 
+          def refresh_access_token(worker_id:, force: false, **)
+            require_relative '../helpers/token_cache'
+
+            unless force
+              cached = Helpers::TokenCache.fetch(worker_id: worker_id)
+              if cached && !Helpers::TokenCache.approaching_expiry?(worker_id: worker_id)
+                return { refreshed: false, worker_id: worker_id, source: :cache, expires_at: cached[:expires_at] }
+              end
+            end
+
+            secret = Helpers::VaultSecrets.read_client_secret(worker_id: worker_id)
+            return { refreshed: false, worker_id: worker_id, error: 'vault_unavailable' } unless secret
+
+            tenant_id = resolve_tenant_id
+            return { refreshed: false, worker_id: worker_id, error: 'no_tenant_id' } unless tenant_id
+
+            scope = Legion::Settings.dig(:identity, :entra, :token_scope) || 'https://graph.microsoft.com/.default'
+            url = "https://login.microsoftonline.com/#{tenant_id}/oauth2/v2.0/token"
+
+            require 'faraday'
+            resp = Faraday.post(url, {
+                                  grant_type:    'client_credentials',
+                                  client_id:     secret[:client_id] || secret[:entra_app_id],
+                                  client_secret: secret[:client_secret],
+                                  scope:         scope
+                                })
+
+            unless resp.success?
+              Legion::Logging.warn "[identity] token refresh failed for #{worker_id}: #{resp.status}"
+              return { refreshed: false, worker_id: worker_id, error: 'token_request_failed' }
+            end
+
+            body = Legion::JSON.load(resp.body)
+            expires_in = body[:expires_in]&.to_i || 3600
+            Helpers::TokenCache.store(worker_id: worker_id, token: body[:access_token], expires_in: expires_in)
+
+            { refreshed: true, worker_id: worker_id, expires_at: Time.now + expires_in }
+          rescue StandardError => e
+            Legion::Logging.warn "[identity] token refresh error: #{e.message}"
+            { refreshed: false, worker_id: worker_id, error: e.message }
+          end
+
+          def rotate_client_secret(worker_id:, dry_run: false, **)
+            rotation_enabled = Legion::Settings.dig(:identity, :entra, :rotation_enabled)
+            buffer_days = Legion::Settings.dig(:identity, :entra, :rotation_buffer_days) || 30
+
+            secret = Helpers::VaultSecrets.read_client_secret(worker_id: worker_id)
+            return { rotated: false, worker_id: worker_id, error: 'vault_unavailable' } unless secret
+
+            expires_at = secret[:client_secret_expires_at]
+            return { rotated: false, worker_id: worker_id, action_required: false, reason: 'no_expiry_tracked' } unless expires_at
+
+            days_remaining = (Time.parse(expires_at.to_s) - Time.now) / 86_400
+            unless days_remaining < buffer_days
+              return { rotated: false, worker_id: worker_id, action_required: false,
+                       days_remaining: days_remaining.round(1) }
+            end
+
+            unless rotation_enabled
+              Legion::Logging.warn "[identity] credential expiring for #{worker_id} in #{days_remaining.round(1)} days"
+              if defined?(Legion::Events)
+                Legion::Events.emit('worker.credential_expiry_warning', {
+                                      worker_id: worker_id, days_remaining: days_remaining.round(1)
+                                    })
+              end
+              return { rotated: false, worker_id: worker_id, action_required: true,
+                       days_remaining: days_remaining.round(1) }
+            end
+
+            return { rotated: false, worker_id: worker_id, dry_run: true, would_rotate: true } if dry_run
+
+            # Graph API rotation would go here when permission is granted
+            { rotated: false, worker_id: worker_id, error: 'graph_api_rotation_not_implemented' }
+          end
+
+          def credential_refresh_cycle(**)
+            return { workers_checked: 0, error: 'data_unavailable' } unless defined?(Legion::Data::Model::DigitalWorker)
+
+            workers = Legion::Data::Model::DigitalWorker.where(lifecycle_state: 'active').all
+            results = { workers_checked: 0, refreshed: 0, warned: 0 }
+
+            workers.each do |worker|
+              next if system_placeholder?(worker.entra_app_id, worker.worker_id)
+
+              results[:workers_checked] += 1
+
+              token_result = refresh_access_token(worker_id: worker.worker_id)
+              results[:refreshed] += 1 if token_result[:refreshed]
+
+              rotation_result = rotate_client_secret(worker_id: worker.worker_id)
+              results[:warned] += 1 if rotation_result[:action_required]
+            end
+
+            results
+          rescue StandardError => e
+            Legion::Logging.warn "[identity] credential refresh cycle error: #{e.message}"
+            { workers_checked: 0, error: e.message }
+          end
+
           private
 
           def find_worker(worker_id)

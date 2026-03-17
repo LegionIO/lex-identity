@@ -238,6 +238,108 @@ RSpec.describe Legion::Extensions::Identity::Runners::Entra do
   end
 
   # ---------------------------------------------------------------------------
+  # refresh_access_token
+  # ---------------------------------------------------------------------------
+
+  describe '#refresh_access_token' do
+    let(:vault_secrets_mod) do
+      Module.new do
+        def self.read_client_secret(worker_id:) # rubocop:disable Lint/UnusedMethodArgument
+          { client_id: 'app-id', client_secret: 'secret-val' }
+        end
+      end
+    end
+
+    before do
+      require 'legion/extensions/identity/helpers/token_cache'
+      Legion::Extensions::Identity::Helpers::TokenCache.clear_all
+      stub_const('Legion::Extensions::Identity::Helpers::VaultSecrets', vault_secrets_mod)
+      allow(client).to receive(:resolve_tenant_id).and_return('tenant-123')
+    end
+
+    after { Legion::Extensions::Identity::Helpers::TokenCache.clear_all }
+
+    it 'returns cached token when available and not expiring' do
+      Legion::Extensions::Identity::Helpers::TokenCache.store(worker_id: 'w1', token: 'cached', expires_in: 3600)
+      result = client.refresh_access_token(worker_id: 'w1')
+      expect(result[:refreshed]).to be false
+      expect(result[:source]).to eq(:cache)
+    end
+
+    it 'returns error when vault unavailable' do
+      vault_nil = Module.new do
+        def self.read_client_secret(**) = nil
+      end
+      stub_const('Legion::Extensions::Identity::Helpers::VaultSecrets', vault_nil)
+      result = client.refresh_access_token(worker_id: 'w1')
+      expect(result[:error]).to eq('vault_unavailable')
+    end
+
+    it 'returns error when no tenant_id' do
+      allow(client).to receive(:resolve_tenant_id).and_return(nil)
+      result = client.refresh_access_token(worker_id: 'w1')
+      expect(result[:error]).to eq('no_tenant_id')
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # rotate_client_secret
+  # ---------------------------------------------------------------------------
+
+  describe '#rotate_client_secret' do
+    before do
+      stub_const('Legion::Settings', Class.new do
+        def self.dig(*keys)
+          map = {
+            %i[identity entra rotation_enabled]     => false,
+            %i[identity entra rotation_buffer_days] => 30
+          }
+          map[keys]
+        end
+
+        def self.[](_key) = {}
+      end)
+    end
+
+    it 'returns no action when no expiry tracked' do
+      vault_mod = Module.new do
+        def self.read_client_secret(**) = { client_secret: 'val' }
+      end
+      stub_const('Legion::Extensions::Identity::Helpers::VaultSecrets', vault_mod)
+
+      result = client.rotate_client_secret(worker_id: 'w1')
+      expect(result[:action_required]).to be false
+      expect(result[:reason]).to eq('no_expiry_tracked')
+    end
+
+    it 'emits warning when rotation not enabled and secret expiring' do
+      vault_mod = Module.new do
+        def self.read_client_secret(**)
+          { client_secret: 'val', client_secret_expires_at: (Time.now + (86_400 * 10)).iso8601 }
+        end
+      end
+      stub_const('Legion::Extensions::Identity::Helpers::VaultSecrets', vault_mod)
+
+      result = client.rotate_client_secret(worker_id: 'w1')
+      expect(result[:action_required]).to be true
+      expect(result[:days_remaining]).to be_within(0.5).of(10.0)
+    end
+
+    it 'returns no action when secret has plenty of time' do
+      vault_mod = Module.new do
+        def self.read_client_secret(**)
+          { client_secret: 'val', client_secret_expires_at: (Time.now + (86_400 * 60)).iso8601 }
+        end
+      end
+      stub_const('Legion::Extensions::Identity::Helpers::VaultSecrets', vault_mod)
+
+      result = client.rotate_client_secret(worker_id: 'w1')
+      expect(result[:action_required]).to be false
+      expect(result[:days_remaining]).to be > 30
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # sync_owner
   # ---------------------------------------------------------------------------
 
