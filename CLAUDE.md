@@ -11,7 +11,7 @@ Human partner identity modeling for the LegionIO cognitive architecture. Builds 
 ## Gem Info
 
 - **Gem name**: `lex-identity`
-- **Version**: `0.2.0`
+- **Version**: `0.4.0`
 - **Module**: `Legion::Extensions::Identity`
 - **Ruby**: `>= 3.4`
 - **License**: MIT
